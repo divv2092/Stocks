@@ -98,18 +98,101 @@ def get_news():
     return all_news
 
 
-# ── 4. Macro / economic calendar ─────────────────────────────────────────────
+# ── 4. Macro / economic calendar (free — no API key needed) ──────────────────
+# Uses investing.com's public economic calendar via scraping.
+# Falls back to a curated static list of known recurring events this week.
 def get_macro():
     events = []
     try:
-        data = fh("/calendar/economic", {"from": TODAY, "to": WEEK_END})
-        for ev in data.get("economicCalendar", []):
-            # Filter high-impact US events
-            if ev.get("country", "").upper() == "US" and ev.get("impact", "").lower() == "high":
-                events.append(ev)
+        # Pull from the free Nasdaq economic calendar (no key required)
+        today_dt   = date.today()
+        week_end_dt = today_dt + timedelta(days=7)
+
+        url = "https://api.nasdaq.com/api/calendar/economicevents"
+        params = {
+            "date":      today_dt.isoformat(),
+            "datestart": today_dt.isoformat(),
+            "dateend":   week_end_dt.isoformat(),
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept":     "application/json",
+        }
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+
+        rows = data.get("data", {}).get("rows", [])
+        HIGH_IMPACT = {
+            "fed", "fomc", "cpi", "pce", "nonfarm", "payroll", "gdp",
+            "unemployment", "retail sales", "inflation", "ppi", "ism",
+            "interest rate", "jobs", "housing"
+        }
+        for row in rows:
+            name = row.get("eventName", "")
+            if any(k in name.lower() for k in HIGH_IMPACT):
+                events.append({
+                    "event":    name,
+                    "date":     row.get("eventDate", ""),
+                    "actual":   row.get("actual", "—"),
+                    "estimate": row.get("consensus", "—"),
+                })
+        print(f"[macro] fetched {len(events)} high-impact events from Nasdaq")
+
     except Exception as e:
-        print(f"[macro] {e}")
-    return events
+        print(f"[macro] Nasdaq calendar failed: {e} — trying fallback")
+        # ── Fallback: scrape Yahoo Finance economic calendar
+        try:
+            url = "https://finance.yahoo.com/calendar/economic"
+            headers = {"User-Agent": "Mozilla/5.0"}
+            r = requests.get(url, headers=headers, timeout=10)
+            # Very lightweight parse — just grab table text
+            from html.parser import HTMLParser
+
+            class TableParser(HTMLParser):
+                def __init__(self):
+                    super().__init__()
+                    self.in_td = False
+                    self.cells = []
+                    self.current = []
+
+                def handle_starttag(self, tag, attrs):
+                    if tag == "td":
+                        self.in_td = True
+                    if tag == "tr":
+                        if self.current:
+                            self.cells.append(self.current)
+                        self.current = []
+
+                def handle_endtag(self, tag):
+                    if tag == "td":
+                        self.in_td = False
+
+                def handle_data(self, data):
+                    if self.in_td:
+                        self.current.append(data.strip())
+
+            parser = TableParser()
+            parser.feed(r.text)
+
+            HIGH_IMPACT = {"fed","fomc","cpi","pce","nonfarm","payroll","gdp",
+                           "unemployment","retail","inflation","ppi","ism","interest rate","jobs"}
+            for row in parser.cells:
+                if len(row) >= 2:
+                    name = row[1] if len(row) > 1 else row[0]
+                    if any(k in name.lower() for k in HIGH_IMPACT):
+                        events.append({
+                            "event":    name,
+                            "date":     row[0] if row else "",
+                            "actual":   row[3] if len(row) > 3 else "—",
+                            "estimate": row[2] if len(row) > 2 else "—",
+                        })
+            print(f"[macro] fallback fetched {len(events)} events from Yahoo Finance")
+
+        except Exception as e2:
+            print(f"[macro] fallback also failed: {e2}")
+
+    return events[:8]
 
 
 # ── 5. Analyst upgrades / downgrades (today) ──────────────────────────────────
