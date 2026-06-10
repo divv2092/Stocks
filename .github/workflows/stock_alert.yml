@@ -2,10 +2,7 @@ name: Daily Stock Alert
 
 on:
   schedule:
-    # 12:00 UTC = 8:00 AM ET (EDT). Adjust to 13:00 UTC in winter (EST).
     - cron: '0 12 * * 1-5'
-
-  # Allow manual trigger from GitHub Actions UI
   workflow_dispatch:
 
 jobs:
@@ -25,6 +22,13 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Check secrets
+        run: |
+          echo "FINNHUB_KEY set: ${{ secrets.FINNHUB_KEY != '' }}"
+          echo "GMAIL_USER set: ${{ secrets.GMAIL_USER != '' }}"
+          echo "GMAIL_APP_PASSWORD set: ${{ secrets.GMAIL_APP_PASSWORD != '' }}"
+          echo "ALERT_TO_EMAIL set: ${{ secrets.ALERT_TO_EMAIL != '' }}"
 
       - name: Run stock alert
         env:
