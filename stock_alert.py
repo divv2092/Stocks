@@ -104,25 +104,76 @@ def get_weekly_summary():
     return rows
 
 
-# ── 3. Earnings calendar (with countdown badge) ───────────────────────────────
+# ── 3. Earnings calendar (countdown + full consensus) ────────────────────────
 def get_earnings():
     results = []
     try:
         data = fh("/calendar/earnings", {"from": TODAY_STR, "to": WEEK_END_STR})
         cal  = data.get("earningsCalendar", [])
         for item in cal:
-            if item.get("symbol") in WATCHLIST:
-                # Calculate days until earnings
-                try:
-                    earn_date = date.fromisoformat(item["date"])
-                    days_away = (earn_date - TODAY).days
-                except Exception:
-                    days_away = 99
-                item["days_away"] = days_away
-                item["imminent"]  = days_away <= EARNINGS_WARN_DAYS  # ← NEW: flag close earnings
-                results.append(item)
+            if item.get("symbol") not in WATCHLIST:
+                continue
+
+            # Days until earnings
+            try:
+                earn_date = date.fromisoformat(item["date"])
+                days_away = (earn_date - TODAY).days
+            except Exception:
+                days_away = 99
+            item["days_away"] = days_away
+            item["imminent"]  = days_away <= EARNINGS_WARN_DAYS
+
+            ticker = item["symbol"]
+
+            # ── Historical EPS surprise (last reported quarter) ───────────────
+            try:
+                hist_eps = fh("/stock/earnings", {"symbol": ticker, "limit": 4})
+                if hist_eps:
+                    last = hist_eps[0]
+                    item["eps_actual"]   = last.get("actual")
+                    item["eps_estimate"] = last.get("estimate")
+                    item["eps_surprise"] = last.get("surprise")
+                    item["eps_surp_pct"] = last.get("surprisePercent")
+                else:
+                    item["eps_actual"]   = item.get("epsActual")
+                    item["eps_estimate"] = item.get("epsEstimate")
+                    item["eps_surprise"] = None
+                    item["eps_surp_pct"] = None
+            except Exception:
+                item["eps_actual"]   = item.get("epsActual")
+                item["eps_estimate"] = item.get("epsEstimate")
+                item["eps_surprise"] = None
+                item["eps_surp_pct"] = None
+
+            # ── Revenue growth from basic metrics ────────────────────────────
+            try:
+                bf = fh("/stock/metric", {"symbol": ticker, "metric": "all"})
+                metric = bf.get("metric", {})
+                item["rev_growth"] = metric.get("revenueGrowthTTMYoy")
+                item["pe_ratio"]   = metric.get("peBasicExclExtraTTM")
+            except Exception:
+                item["rev_growth"] = None
+                item["pe_ratio"]   = None
+
+            # ── Analyst buy/hold/sell counts ─────────────────────────────────
+            try:
+                rec = fh("/stock/recommendation", {"symbol": ticker})
+                if rec:
+                    r = rec[0]
+                    item["analyst_buy"]   = r.get("buy", 0)
+                    item["analyst_hold"]  = r.get("hold", 0)
+                    item["analyst_sell"]  = r.get("sell", 0)
+                    item["analyst_total"] = item["analyst_buy"] + item["analyst_hold"] + item["analyst_sell"]
+                else:
+                    item["analyst_buy"] = item["analyst_hold"] = item["analyst_sell"] = item["analyst_total"] = 0
+            except Exception:
+                item["analyst_buy"] = item["analyst_hold"] = item["analyst_sell"] = item["analyst_total"] = 0
+
+            results.append(item)
+
     except Exception as e:
         print(f"[earnings] {e}")
+
     results.sort(key=lambda x: x.get("days_away", 99))
     return results
 
@@ -282,7 +333,7 @@ def build_email(prices, earnings, news, macro, analyst, weekly=None):
     price_section = section("Price Snapshot", "📊", alert_banner + table(
         th("Ticker") + th("Close", "right") + th("Day Chg", "right"), price_rows))
 
-    # ── Earnings rows (with countdown badge) ──────────────────────────────────
+    # ── Earnings rows (countdown + consensus) ────────────────────────────────
     earn_rows = ""
     if earnings:
         for e in earnings:
@@ -297,23 +348,95 @@ def build_email(prices, earnings, news, macro, analyst, weekly=None):
             else:
                 badge_text, badge_color = f"In {days_away}d", "#6b7280"
 
-            badge = f'<span style="background:{badge_color};color:#fff;font-size:10px;padding:2px 6px;border-radius:3px;font-weight:700;margin-left:6px">{badge_text}</span>'
-            row_bg = "#fff7ed" if imminent else "#ffffff"
-            est = e.get("epsEstimate", "N/A")
-            act = e.get("epsActual", "—")
+            badge    = f'<span style="background:{badge_color};color:#fff;font-size:10px;padding:2px 6px;border-radius:3px;font-weight:700;margin-left:6px">{badge_text}</span>'
+            row_bg   = "#fff7ed" if imminent else "#ffffff"
+
+            # EPS values
+            est      = e.get("eps_estimate") or e.get("epsEstimate") or "—"
+            act      = e.get("eps_actual")   or e.get("epsActual")   or "—"
+            surp_pct = e.get("eps_surp_pct")
+
+            # Beat / Miss / In-line badge
+            if surp_pct is not None:
+                try:
+                    sp = float(surp_pct)
+                    if sp > 3:
+                        verdict = '<span style="background:#16a34a;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px">BEAT</span>'
+                    elif sp < -3:
+                        verdict = '<span style="background:#dc2626;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px">MISS</span>'
+                    else:
+                        verdict = '<span style="background:#6b7280;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px">IN-LINE</span>'
+                    surprise_str = f"({'+' if sp>=0 else ''}{sp:.1f}%) {verdict}"
+                except Exception:
+                    surprise_str = "—"
+            else:
+                surprise_str = "<span style='color:#9ca3af;font-size:12px'>Upcoming</span>"
+
+            # Format EPS nicely
+            def fmt_eps(v):
+                try: return f"${float(v):.2f}"
+                except: return str(v) if v and v != "—" else "—"
+
+            # Revenue growth
+            rev_g = e.get("rev_growth")
+            rev_str = f"{'+' if rev_g and rev_g>=0 else ''}{rev_g:.1f}% YoY" if rev_g is not None else "—"
+            rev_color = "#16a34a" if rev_g and rev_g > 0 else "#dc2626"
+
+            # Analyst consensus mini bar
+            ab = e.get("analyst_buy", 0)
+            ah = e.get("analyst_hold", 0)
+            as_ = e.get("analyst_sell", 0)
+            at = e.get("analyst_total", 0) or 1
+            buy_w  = int(ab / at * 60)
+            hold_w = int(ah / at * 60)
+            sell_w = int(as_ / at * 60)
+            consensus_signal = "BUY" if ab/at > 0.6 else ("SELL" if as_/at > 0.4 else "HOLD")
+            sig_color = "#16a34a" if consensus_signal=="BUY" else ("#dc2626" if consensus_signal=="SELL" else "#d97706")
+            analyst_bar = f"""
+              <div style="display:flex;align-items:center;gap:4px;font-size:11px">
+                <div style="display:flex;height:6px;border-radius:3px;overflow:hidden;width:60px">
+                  <div style="width:{buy_w}px;background:#16a34a"></div>
+                  <div style="width:{hold_w}px;background:#d97706"></div>
+                  <div style="width:{sell_w}px;background:#dc2626"></div>
+                </div>
+                <span style="color:{sig_color};font-weight:700">{consensus_signal}</span>
+                <span style="color:#9ca3af">({at})</span>
+              </div>""" if at > 0 else "—"
+
+            # PE ratio
+            pe = e.get("pe_ratio")
+            pe_str = f"{pe:.1f}x" if pe else "—"
+
             earn_rows += f"""
-            <tr style="background:{row_bg}">
-              <td style="padding:8px 12px;font-weight:700;font-family:monospace">{e['symbol']}{badge}</td>
-              <td style="padding:8px 12px">{e.get('date','')}</td>
-              <td style="padding:8px 12px">{e.get('hour','')}</td>
-              <td style="padding:8px 12px;text-align:right">{est}</td>
-              <td style="padding:8px 12px;text-align:right">{act}</td>
+            <tr style="background:{row_bg};border-bottom:1px solid #f3f4f6">
+              <td style="padding:10px 12px;font-weight:700;font-family:monospace;vertical-align:top">
+                {e['symbol']}{badge}
+                <div style="font-size:11px;color:#6b7280;font-weight:400;margin-top:4px">{e.get('date','')} {e.get('hour','')}</div>
+              </td>
+              <td style="padding:10px 12px;text-align:right;vertical-align:top">
+                <div style="font-weight:600">{fmt_eps(est)}</div>
+                <div style="font-size:11px;color:#9ca3af">Est. EPS</div>
+              </td>
+              <td style="padding:10px 12px;text-align:right;vertical-align:top">
+                <div style="font-weight:600">{fmt_eps(act)}</div>
+                <div style="font-size:11px;color:#9ca3af">Act. EPS</div>
+              </td>
+              <td style="padding:10px 12px;text-align:right;vertical-align:top">
+                {surprise_str}
+              </td>
+              <td style="padding:10px 12px;text-align:right;vertical-align:top">
+                <div style="color:{rev_color};font-weight:600">{rev_str}</div>
+                <div style="font-size:11px;color:#9ca3af">Rev Growth</div>
+              </td>
+              <td style="padding:10px 12px;vertical-align:top">
+                {analyst_bar}
+              </td>
             </tr>"""
     else:
-        earn_rows = '<tr><td colspan="5" style="padding:12px;color:#6b7280;text-align:center">No earnings this week for watchlist</td></tr>'
+        earn_rows = '<tr><td colspan="6" style="padding:12px;color:#6b7280;text-align:center">No earnings this week for watchlist</td></tr>'
 
-    earn_section = section("Earnings This Week", "📅", table(
-        th("Ticker") + th("Date") + th("Time") + th("Est. EPS", "right") + th("Act. EPS", "right"),
+    earn_section = section("Earnings Calendar & Consensus", "📅", table(
+        th("Ticker") + th("Est. EPS", "right") + th("Act. EPS", "right") + th("Surprise", "right") + th("Rev Growth", "right") + th("Analyst Signal"),
         earn_rows))
 
     # ── Weekly summary section (Fridays only) ─────────────────────────────────
