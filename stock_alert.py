@@ -156,24 +156,7 @@ def get_earnings():
     return results
 
 
-# ── 4. Company news ───────────────────────────────────────────────────────────
-def get_news():
-    all_news = []
-    for ticker in WATCHLIST:
-        try:
-            items = fh("/company-news", {"symbol": ticker, "from": TODAY_STR, "to": TODAY_STR})
-            for n in items[:3]:
-                all_news.append({
-                    "ticker":   ticker,
-                    "headline": n.get("headline", ""),
-                    "source":   n.get("source", ""),
-                    "url":      n.get("url", "#"),
-                    "datetime": n.get("datetime", 0),
-                })
-        except Exception as e:
-            print(f"[news] {ticker}: {e}")
-    all_news.sort(key=lambda x: x["datetime"], reverse=True)
-    return all_news
+# ── 4. (News section removed) ───────────────────────────────────────────────
 
 
 # ── 5. Macro calendar ─────────────────────────────────────────────────────────
@@ -292,7 +275,7 @@ def get_portfolio():
 
 
 # ── 8. Build HTML email ───────────────────────────────────────────────────────
-def build_email(prices, earnings, news, macro, analyst, weekly=None, portfolio=None, port_summary=None):
+def build_email(prices, earnings, macro, analyst, weekly=None, portfolio=None, port_summary=None):
     today_str  = datetime.now().strftime("%A, %B %d, %Y")
     email_type = "📊 Weekly Digest" if IS_FRIDAY else "📈 Daily Alert"
 
@@ -494,9 +477,7 @@ def build_email(prices, earnings, news, macro, analyst, weekly=None, portfolio=N
         wrows = "".join(f'<tr style="background:{"#fef2f2" if w["week_chg"]<-3 else "#f0fdf4" if w["week_chg"]>3 else "#ffffff"}"><td style="padding:8px 12px;font-weight:700;font-family:monospace">{w["ticker"]}</td><td style="padding:8px 12px;text-align:right">${w["week_close"]:.2f}</td><td style="padding:8px 12px;text-align:right">{color_pct(w["week_chg"])}</td><td style="padding:8px 12px;text-align:right;color:#6b7280">${w["week_high"]:.2f}</td><td style="padding:8px 12px;text-align:right;color:#6b7280">${w["week_low"]:.2f}</td></tr>' for w in weekly)
         weekly_section = section("Week in Review", "🗓️", cards + table(th("Ticker")+th("Close","right")+th("Week Chg","right")+th("High","right")+th("Low","right"), wrows))
 
-    # ── News ──────────────────────────────────────────────────────────────────
-    news_items = "".join(f'<tr><td style="padding:8px 12px;font-weight:700;font-family:monospace;white-space:nowrap">{n["ticker"]}</td><td style="padding:8px 12px"><a href="{n["url"]}" style="color:#1d4ed8;text-decoration:none">{n["headline"]}</a><span style="color:#9ca3af;font-size:12px;margin-left:6px">— {n["source"]}</span></td><td style="padding:8px 12px;color:#6b7280;font-size:12px;white-space:nowrap">{datetime.fromtimestamp(n["datetime"]).strftime("%I:%M %p") if n["datetime"] else ""}</td></tr>' for n in news[:15]) or '<tr><td colspan="3" style="padding:12px;color:#6b7280;text-align:center">No news today</td></tr>'
-    news_section = section("Top News", "📰", table(th("Ticker")+th("Headline")+th("Time"), news_items))
+
 
     # ── Macro ─────────────────────────────────────────────────────────────────
     macro_items = "".join(f'<tr><td style="padding:8px 12px;font-weight:600">{ev.get("event","")}</td><td style="padding:8px 12px;color:#6b7280">{ev.get("date","")}</td><td style="padding:8px 12px;text-align:right">{ev.get("actual","—")}</td><td style="padding:8px 12px;text-align:right;color:#6b7280">{ev.get("estimate","—")}</td></tr>' for ev in macro[:8]) or '<tr><td colspan="4" style="padding:12px;color:#6b7280;text-align:center">No high-impact US macro events this week</td></tr>'
@@ -518,7 +499,7 @@ def build_email(prices, earnings, news, macro, analyst, weekly=None, portfolio=N
     body = portfolio_section + price_section + earn_section
     if IS_FRIDAY and weekly_section:
         body += weekly_section
-    body += news_section + macro_section + analyst_section
+    body += macro_section + analyst_section
 
     return f"""<!DOCTYPE html>
 <html>
@@ -564,14 +545,13 @@ if __name__ == "__main__":
     print(f"⏳ Fetching data... (Friday={IS_FRIDAY})")
     prices              = get_price_snapshot()
     earnings            = get_earnings()
-    news                = get_news()
     macro               = get_macro()
     analyst             = get_analyst_actions()
     portfolio, port_sum = get_portfolio()
     weekly              = get_weekly_summary() if IS_FRIDAY else []
 
     movers = [r for r in prices if r["alert"]]
-    print(f"  prices={len(prices)} movers={len(movers)} earnings={len(earnings)} news={len(news)} macro={len(macro)} analyst={len(analyst)} portfolio={len(portfolio)} weekly={len(weekly)}")
+    print(f"  prices={len(prices)} movers={len(movers)} earnings={len(earnings)} macro={len(macro)} analyst={len(analyst)} portfolio={len(portfolio)} weekly={len(weekly)}")
 
     date_str = datetime.now().strftime("%b %d, %Y")
     tdg      = port_sum.get("total_day_gain", 0)
@@ -585,5 +565,5 @@ if __name__ == "__main__":
     else:
         subject = f"📈 Stock Alert{port_tag} — {date_str}"
 
-    html = build_email(prices, earnings, news, macro, analyst, weekly, portfolio, port_sum)
+    html = build_email(prices, earnings, macro, analyst, weekly, portfolio, port_sum)
     send_email(html, subject)
