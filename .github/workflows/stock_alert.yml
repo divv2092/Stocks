@@ -18,31 +18,21 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Check secrets
+      - name: Debug - verify correct file
         run: |
-          echo "FINNHUB_KEY set: ${{ secrets.FINNHUB_KEY != '' }}"
-          echo "GMAIL_USER set: ${{ secrets.GMAIL_USER != '' }}"
-          echo "GMAIL_APP_PASSWORD set: ${{ secrets.GMAIL_APP_PASSWORD != '' }}"
-          echo "ALERT_TO_EMAIL set: ${{ secrets.ALERT_TO_EMAIL != '' }}"
+          echo "=== News check (should say REMOVED) ==="
+          grep -n "get_news\|Top News" alert.py || echo "✅ NEWS REMOVED"
+          echo "=== Portfolio check (should find lines) ==="
+          grep -n "get_portfolio\|portfolio_section" alert.py || echo "❌ PORTFOLIO MISSING"
 
-      - name: Debug - show script version
-        run: |
-          echo "=== First 30 lines of stock_alert.py ==="
-          head -30 stock_alert.py
-          echo "=== Checking for news section ==="
-          grep -n "get_news\|news_section\|Top News" stock_alert.py || echo "NEWS REMOVED ✅"
-          echo "=== Checking for portfolio ==="
-          grep -n "get_portfolio\|portfolio_section" stock_alert.py || echo "PORTFOLIO MISSING ❌"
-          
       - name: Run stock alert
         env:
           FINNHUB_KEY:        ${{ secrets.FINNHUB_KEY }}
           GMAIL_USER:         ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           ALERT_TO_EMAIL:     ${{ secrets.ALERT_TO_EMAIL }}
-        run: python stock_alert.py
+        run: python alert.py
