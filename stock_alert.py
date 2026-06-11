@@ -23,6 +23,23 @@ WATCHLIST            = ["TDOC", "NVO", "BABA", "NOW", "SMH", "META", "GOOGL", "A
 PRICE_ALERT_PCT      = 3.0          # flag tickers that move ±3% or more
 EARNINGS_WARN_DAYS   = 3            # highlight earnings within this many days
 
+# ── Portfolio holdings ────────────────────────────────────────────────────────
+# Format: "TICKER": (shares, avg_buy_price)
+# Update these whenever you buy/sell. Tickers here don't need to be in WATCHLIST.
+PORTFOLIO = {
+    "META":  (10,  480.00),
+    "GOOGL": (5,   170.00),
+    "AMD":   (15,  145.00),
+    "NOW":   (3,   850.00),
+    "NKE":   (250,   53.00),
+    "MRNA":  (100,   27.00),
+    "TDOC":  (450,   7.00),
+    "NVO":   (800,   37.00),
+    "BABA":  (50,   122.00),
+    "CVNA":  (-385,  81.00),
+    "SMH":   (-100,   576.00),
+}
+
 FINNHUB_KEY  = os.environ["FINNHUB_KEY"]
 GMAIL_USER   = os.environ["GMAIL_USER"]
 GMAIL_PASS   = os.environ["GMAIL_APP_PASSWORD"]
@@ -275,8 +292,79 @@ def get_analyst_actions():
     return actions
 
 
-# ── 7. Build HTML email ───────────────────────────────────────────────────────
-def build_email(prices, earnings, news, macro, analyst, weekly=None):
+# ── 7. Portfolio snapshot ─────────────────────────────────────────────────────
+def get_portfolio():
+    """
+    Fetches current prices for each holding, calculates:
+      - Current value, cost basis, total gain/loss $, total gain/loss %
+      - Daily P&L for each position
+      - Portfolio allocation % per position
+      - Overall portfolio summary (total value, total gain, day change)
+    """
+    positions = []
+    total_value    = 0.0
+    total_cost     = 0.0
+    total_day_gain = 0.0
+
+    for ticker, (shares, avg_price) in PORTFOLIO.items():
+        try:
+            t    = yf.Ticker(ticker)
+            hist = t.history(period="2d")
+            if len(hist) < 1:
+                continue
+
+            current_price = hist["Close"].iloc[-1]
+            prev_price    = hist["Close"].iloc[-2] if len(hist) >= 2 else current_price
+
+            cost_basis    = shares * avg_price
+            current_value = shares * current_price
+            total_gain    = current_value - cost_basis
+            total_gain_pct= (total_gain / cost_basis) * 100 if cost_basis else 0
+            day_gain      = shares * (current_price - prev_price)
+            day_gain_pct  = (current_price - prev_price) / prev_price * 100 if prev_price else 0
+
+            positions.append({
+                "ticker":        ticker,
+                "shares":        shares,
+                "avg_price":     avg_price,
+                "current_price": current_price,
+                "cost_basis":    cost_basis,
+                "current_value": current_value,
+                "total_gain":    total_gain,
+                "total_gain_pct":total_gain_pct,
+                "day_gain":      day_gain,
+                "day_gain_pct":  day_gain_pct,
+            })
+
+            total_value    += current_value
+            total_cost     += cost_basis
+            total_day_gain += day_gain
+
+        except Exception as e:
+            print(f"[portfolio] {ticker}: {e}")
+
+    # Add allocation % now that we know total_value
+    for p in positions:
+        p["allocation"] = (p["current_value"] / total_value * 100) if total_value else 0
+
+    # Sort by current value descending
+    positions.sort(key=lambda x: x["current_value"], reverse=True)
+
+    summary = {
+        "total_value":     total_value,
+        "total_cost":      total_cost,
+        "total_gain":      total_value - total_cost,
+        "total_gain_pct":  ((total_value - total_cost) / total_cost * 100) if total_cost else 0,
+        "total_day_gain":  total_day_gain,
+        "total_day_pct":   (total_day_gain / (total_value - total_day_gain) * 100) if total_value else 0,
+    }
+
+    print(f"[portfolio] {len(positions)} positions, total=${total_value:,.0f}")
+    return positions, summary
+
+
+# ── 8. Build HTML email ───────────────────────────────────────────────────────
+def build_email(prices, earnings, news, macro, analyst, weekly=None, portfolio=None, port_summary=None):
     today_str = datetime.now().strftime("%A, %B %d, %Y")
     email_type = "📊 Weekly Digest" if IS_FRIDAY else "📈 Daily Alert"
 
@@ -530,11 +618,113 @@ def build_email(prices, earnings, news, macro, analyst, weekly=None):
         th("Ticker") + th("Buy","center") + th("Hold","center") + th("Sell","center") + th("Signal","center"),
         analyst_rows))
 
+    # ── Portfolio section ─────────────────────────────────────────────────────
+    portfolio     = portfolio or []
+    port_summary  = port_summary or {}
+    if portfolio and port_summary:
+        tv   = port_summary.get("total_value", 0)
+        tc   = port_summary.get("total_cost", 0)
+        tg   = port_summary.get("total_gain", 0)
+        tgp  = port_summary.get("total_gain_pct", 0)
+        tdg  = port_summary.get("total_day_gain", 0)
+        tdp  = port_summary.get("total_day_pct", 0)
+
+        gain_color    = "#16a34a" if tg  >= 0 else "#dc2626"
+        day_color     = "#16a34a" if tdg >= 0 else "#dc2626"
+        gain_arrow    = "▲" if tg  >= 0 else "▼"
+        day_arrow     = "▲" if tdg >= 0 else "▼"
+
+        # Summary cards row
+        summary_cards = f"""
+        <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap">
+          <div style="flex:1;min-width:130px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:14px;text-align:center">
+            <div style="font-size:11px;color:#64748b;font-weight:600;text-transform:uppercase;margin-bottom:4px">Total Value</div>
+            <div style="font-size:22px;font-weight:800;color:#0f172a">${tv:,.0f}</div>
+          </div>
+          <div style="flex:1;min-width:130px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:14px;text-align:center">
+            <div style="font-size:11px;color:#64748b;font-weight:600;text-transform:uppercase;margin-bottom:4px">Total Cost</div>
+            <div style="font-size:22px;font-weight:800;color:#0f172a">${tc:,.0f}</div>
+          </div>
+          <div style="flex:1;min-width:130px;background:{"#f0fdf4" if tg>=0 else "#fef2f2"};border:1px solid {"#86efac" if tg>=0 else "#fca5a5"};border-radius:10px;padding:14px;text-align:center">
+            <div style="font-size:11px;color:#64748b;font-weight:600;text-transform:uppercase;margin-bottom:4px">Total Gain</div>
+            <div style="font-size:20px;font-weight:800;color:{gain_color}">{gain_arrow} ${abs(tg):,.0f}</div>
+            <div style="font-size:12px;color:{gain_color};font-weight:600">{gain_arrow} {abs(tgp):.2f}%</div>
+          </div>
+          <div style="flex:1;min-width:130px;background:{"#f0fdf4" if tdg>=0 else "#fef2f2"};border:1px solid {"#86efac" if tdg>=0 else "#fca5a5"};border-radius:10px;padding:14px;text-align:center">
+            <div style="font-size:11px;color:#64748b;font-weight:600;text-transform:uppercase;margin-bottom:4px">Today's P&L</div>
+            <div style="font-size:20px;font-weight:800;color:{day_color}">{day_arrow} ${abs(tdg):,.0f}</div>
+            <div style="font-size:12px;color:{day_color};font-weight:600">{day_arrow} {abs(tdp):.2f}%</div>
+          </div>
+        </div>"""
+
+        # Allocation bar (horizontal stacked bar)
+        bar_segments = ""
+        colors = ["#3b82f6","#8b5cf6","#06b6d4","#10b981","#f59e0b","#ef4444","#ec4899","#6366f1","#14b8a6","#f97316","#84cc16"]
+        for i, p in enumerate(portfolio):
+            c = colors[i % len(colors)]
+            bar_segments += f'<div style="width:{p["allocation"]:.1f}%;background:{c};height:100%;display:inline-block;vertical-align:top" title="{p["ticker"]} {p["allocation"]:.1f}%"></div>'
+
+        alloc_bar = f"""
+        <div style="margin-bottom:8px">
+          <div style="font-size:11px;color:#6b7280;font-weight:600;margin-bottom:6px;text-transform:uppercase">Allocation</div>
+          <div style="height:10px;border-radius:5px;overflow:hidden;background:#f3f4f6;width:100%">
+            {bar_segments}
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">"""
+        for i, p in enumerate(portfolio):
+            c = colors[i % len(colors)]
+            alloc_bar += f'<span style="font-size:11px;color:#374151"><span style="display:inline-block;width:8px;height:8px;background:{c};border-radius:2px;margin-right:3px;vertical-align:middle"></span>{p["ticker"]} {p["allocation"]:.1f}%</span>'
+        alloc_bar += "</div></div>"
+
+        # Positions table
+        pos_rows = ""
+        for p in portfolio:
+            tg_color  = "#16a34a" if p["total_gain"] >= 0 else "#dc2626"
+            day_color2= "#16a34a" if p["day_gain"]   >= 0 else "#dc2626"
+            tg_arrow  = "▲" if p["total_gain"] >= 0 else "▼"
+            day_arrow2= "▲" if p["day_gain"]   >= 0 else "▼"
+            row_bg    = "#fafffe" if p["total_gain"] >= 0 else "#fffafa"
+
+            pos_rows += f"""
+            <tr style="background:{row_bg};border-bottom:1px solid #f3f4f6">
+              <td style="padding:10px 12px;font-weight:700;font-family:monospace;font-size:14px">{p["ticker"]}</td>
+              <td style="padding:10px 12px;text-align:right;color:#6b7280">{p["shares"]} @ ${p["avg_price"]:.2f}</td>
+              <td style="padding:10px 12px;text-align:right;font-weight:600">${p["current_price"]:.2f}</td>
+              <td style="padding:10px 12px;text-align:right;font-weight:700">${p["current_value"]:,.0f}</td>
+              <td style="padding:10px 12px;text-align:right">
+                <span style="color:{tg_color};font-weight:700">{tg_arrow} ${abs(p["total_gain"]):,.0f}</span>
+                <div style="font-size:11px;color:{tg_color}">{tg_arrow} {abs(p["total_gain_pct"]):.2f}%</div>
+              </td>
+              <td style="padding:10px 12px;text-align:right">
+                <span style="color:{day_color2};font-weight:700">{day_arrow2} ${abs(p["day_gain"]):,.0f}</span>
+                <div style="font-size:11px;color:{day_color2}">{day_arrow2} {abs(p["day_gain_pct"]):.2f}%</div>
+              </td>
+              <td style="padding:10px 12px;text-align:right;color:#6b7280;font-size:12px">{p["allocation"]:.1f}%</td>
+            </tr>"""
+
+        port_table = f"""
+        <table style="width:100%;border-collapse:collapse;font-size:14px;color:#374151">
+          <thead><tr style="background:#f9fafb;border-bottom:1px solid #e5e7eb">
+            <th style="padding:8px 12px;text-align:left;font-weight:600;color:#6b7280;font-size:12px;text-transform:uppercase">Ticker</th>
+            <th style="padding:8px 12px;text-align:right;font-weight:600;color:#6b7280;font-size:12px;text-transform:uppercase">Position</th>
+            <th style="padding:8px 12px;text-align:right;font-weight:600;color:#6b7280;font-size:12px;text-transform:uppercase">Price</th>
+            <th style="padding:8px 12px;text-align:right;font-weight:600;color:#6b7280;font-size:12px;text-transform:uppercase">Value</th>
+            <th style="padding:8px 12px;text-align:right;font-weight:600;color:#6b7280;font-size:12px;text-transform:uppercase">Total G/L</th>
+            <th style="padding:8px 12px;text-align:right;font-weight:600;color:#6b7280;font-size:12px;text-transform:uppercase">Day G/L</th>
+            <th style="padding:8px 12px;text-align:right;font-weight:600;color:#6b7280;font-size:12px;text-transform:uppercase">Alloc</th>
+          </tr></thead>
+          <tbody>{pos_rows}</tbody>
+        </table>"""
+
+        portfolio_section = section("💼 Portfolio", "💼", summary_cards + alloc_bar + port_table)
+    else:
+        portfolio_section = ""
+
     # ── Assemble ──────────────────────────────────────────────────────────────
     header_color = "linear-gradient(135deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%)" if IS_FRIDAY else "linear-gradient(135deg,#0f172a 0%,#1e3a5f 100%)"
     friday_badge = '<span style="background:#f59e0b;color:#1a1a2e;font-size:11px;font-weight:800;padding:3px 8px;border-radius:4px;margin-left:10px;vertical-align:middle">FRIDAY DIGEST</span>' if IS_FRIDAY else ""
 
-    body_sections = price_section + earn_section
+    body_sections = portfolio_section + price_section + earn_section
     if IS_FRIDAY and weekly_section:
         body_sections += weekly_section
     body_sections += news_section + macro_section + analyst_section
@@ -583,25 +773,28 @@ def send_email(html_body, subject):
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print(f"⏳ Fetching data... (Friday={IS_FRIDAY})")
-    prices   = get_price_snapshot()
-    earnings = get_earnings()
-    news     = get_news()
-    macro    = get_macro()
-    analyst  = get_analyst_actions()
-    weekly   = get_weekly_summary() if IS_FRIDAY else []
+    prices              = get_price_snapshot()
+    earnings            = get_earnings()
+    news                = get_news()
+    macro               = get_macro()
+    analyst             = get_analyst_actions()
+    portfolio, port_sum = get_portfolio()
+    weekly              = get_weekly_summary() if IS_FRIDAY else []
 
     movers = [r for r in prices if r["alert"]]
-    print(f"  prices={len(prices)} movers={len(movers)} earnings={len(earnings)} news={len(news)} macro={len(macro)} analyst={len(analyst)} weekly={len(weekly)}")
+    print(f"  prices={len(prices)} movers={len(movers)} earnings={len(earnings)} news={len(news)} macro={len(macro)} analyst={len(analyst)} portfolio={len(portfolio)} weekly={len(weekly)}")
 
-    # Subject line reflects what's in the email
+    # Subject line: include portfolio day P&L if available
     date_str = datetime.now().strftime("%b %d, %Y")
+    port_day = port_sum.get("total_day_gain", 0)
+    port_tag = f" | Port {'+' if port_day>=0 else ''}{port_day:,.0f}" if port_sum else ""
     if IS_FRIDAY:
-        subject = f"📊 Weekly Digest — {date_str}"
+        subject = f"📊 Weekly Digest{port_tag} — {date_str}"
     elif movers:
         mover_str = ", ".join(f"{r['ticker']} {pct(r['chg'])}" for r in sorted(movers, key=lambda x: abs(x['chg']), reverse=True)[:3])
-        subject = f"⚡ Price Alert: {mover_str} — {date_str}"
+        subject = f"⚡ Price Alert: {mover_str}{port_tag} — {date_str}"
     else:
-        subject = f"📈 Stock Alert — {date_str}"
+        subject = f"📈 Stock Alert{port_tag} — {date_str}"
 
-    html = build_email(prices, earnings, news, macro, analyst, weekly)
+    html = build_email(prices, earnings, news, macro, analyst, weekly, portfolio, port_sum)
     send_email(html, subject)
